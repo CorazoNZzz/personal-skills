@@ -1,0 +1,20 @@
+[
+  {
+    "project_name": "镇海项目",
+    "work_hours": 4,
+    "progress_content": "参加周例会；编制排污许可证审核规则skill",
+    "risks_issues": ""
+  },
+  {
+    "project_name": "余姚项目",
+    "work_hours": 3,
+    "progress_content": "查看余姚系统整体流程逻辑",
+    "risks_issues": ""
+  },
+  {
+    "project_name": "学习或其他",
+    "work_hours": 2,
+    "progress_content": "编制完成语音自动填写日报skill",
+    "risks_issues": ""
+  }
+]

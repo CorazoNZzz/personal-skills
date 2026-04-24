@@ -1,0 +1,4 @@
+interface:
+  display_name: "OpenClaw Daily Report"
+  short_description: "Auto-fill and submit daily reports via /v1/daily-reports APIs"
+  default_prompt: "Use this skill to convert user updates into compliant daily report submissions. Require api_base from args or .local-secrets.json; do not guess localhost or run netstat/browser probing."

@@ -1,0 +1,30 @@
+{
+  "read_cell_cmd_template": [
+    "C:\\Program Files\\nodejs\\node.exe",
+    "C:\\Users\\corazonliu\\AppData\\Roaming\\QClaw\\npm-global\\node_modules\\mcporter\\dist\\cli.js",
+    "call",
+    "--server",
+    "kdocs",
+    "--tool",
+    "sheet.get_range_data",
+    "file_id={file_id}",
+    "sheetId={sheet_id}",
+    "range={{\"rowFrom\":{row0_from},\"rowTo\":{row0_to},\"colFrom\":{col0_from},\"colTo\":{col0_to}}}",
+    "--output",
+    "json"
+  ],
+  "write_cell_cmd_template": [
+    "C:\\Program Files\\nodejs\\node.exe",
+    "C:\\Users\\corazonliu\\AppData\\Roaming\\QClaw\\npm-global\\node_modules\\mcporter\\dist\\cli.js",
+    "call",
+    "--server",
+    "kdocs",
+    "--tool",
+    "sheet.update_range_data",
+    "file_id={file_id}",
+    "sheetId={sheet_id}",
+    "rangeData=[{{\"opType\":\"{op_type}\",\"rowFrom\":{row0},\"rowTo\":{row0},\"colFrom\":{col0},\"colTo\":{col0},\"formula\":{formula_json}}}]",
+    "--output",
+    "json"
+  ]
+}
