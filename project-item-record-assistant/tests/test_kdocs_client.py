@@ -69,6 +69,23 @@ class KDocsClientTest(unittest.TestCase):
         finally:
             path.unlink(missing_ok=True)
 
+    def test_number_width_follows_existing_sheet(self):
+        cells = {"1,1": "项目推进与留痕台账"}
+        for col, header in enumerate(EXPECTED_HEADERS, start=1):
+            cells[f"2,{col}"] = header
+        cells["3,1"] = "SX-002"
+        cells["5,1"] = "SX-004"
+
+        path = mock_sheet(cells)
+        try:
+            client = KDocsClient(MockBackend(path), max_scan_rows=10, header_row=2)
+            number, row = client.next_number_and_row(client.read_table_cells())
+
+            self.assertEqual(number, "SX-005")
+            self.assertEqual(row, 6)
+        finally:
+            path.unlink(missing_ok=True)
+
 
 if __name__ == "__main__":
     unittest.main()

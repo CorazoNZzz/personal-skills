@@ -14,6 +14,9 @@ from parser import parse_iso_date, parse_item, render_draft, tab_row, update_dra
 from state_store import DraftStore, StateError
 
 
+DEFAULT_CONFIG_FILE = SCRIPT_DIR.parents[0] / "data" / "config.json"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="项目事项记录助手")
     parser.add_argument("--state-file", default="", help="草稿状态文件，默认 data/drafts.json")
@@ -31,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("confirm_add", aliases=["confirm"], help="确认后追加写入金山文档")
     p.add_argument("--draft-id", required=True)
     p.add_argument("--backend", choices=["mcporter", "mock"], default="mcporter")
-    p.add_argument("--config", default="", help=".local-config.json")
+    p.add_argument("--config", default=str(DEFAULT_CONFIG_FILE), help="配置文件，默认 data/config.json；不存在时使用内置链接解析")
     p.add_argument("--mock-file", default="", help="mock backend JSON file")
 
     p = sub.add_parser("cancel_draft", aliases=["cancel"], help="取消草稿，不写入")

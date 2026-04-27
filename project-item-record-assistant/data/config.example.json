@@ -1,0 +1,12 @@
+{
+  "mcporter_server": "kdocs-qclaw",
+  "link_id": "crcZHpAS41uj",
+  "file_id": "",
+  "drive_id": "",
+  "sheet_name": "事项总表",
+  "sheet_id": "",
+  "header_row": 2,
+  "max_scan_rows": 1000,
+  "api_index_base": 0,
+  "mcporter_cli": "/Users/corazon/Library/Application Support/QClaw/npm-global/lib/node_modules/mcporter/dist/cli.js"
+}

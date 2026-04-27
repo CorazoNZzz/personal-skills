@@ -14,9 +14,12 @@ from parser import EXPECTED_HEADERS, tab_row
 
 DOC_NAME = "项目推进与留痕台账"
 DOC_LINK = "https://www.kdocs.cn/l/crcZHpAS41uj"
+DOC_LINK_ID = "crcZHpAS41uj"
 SHEET_NAME = "事项总表"
 DEFAULT_HEADER_ROW = 2
 MAX_WRITE_COLUMNS = 100
+DEFAULT_MCPORTER_CLI = "/Users/corazon/Library/Application Support/QClaw/npm-global/lib/node_modules/mcporter/dist/cli.js"
+LEGACY_MCPORTER_CLI = "/Users/corazon/Library/Application Support/QClaw/npm-global/node_modules/mcporter/dist/cli.js"
 
 
 class KDocsError(RuntimeError):
@@ -95,6 +98,28 @@ def run_cmd(cmd: List[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
+def response_detail(stdout: str) -> Dict[str, Any]:
+    raw = stdout.strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except Exception as exc:
+        raise KDocsError(f"cannot parse kdocs response as JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        return {}
+    inner = data.get("data")
+    if isinstance(inner, dict):
+        nested = inner.get("data")
+        if isinstance(nested, dict):
+            return nested
+        detail = inner.get("detail")
+        if isinstance(detail, dict):
+            return detail
+    detail = data.get("detail")
+    return detail if isinstance(detail, dict) else data
+
+
 class SheetBackend:
     def read_range(self, row_from: int, row_to: int, col_from: int, col_to: int) -> Dict[Tuple[int, int], str]:
         raise NotImplementedError
@@ -129,21 +154,60 @@ class MockBackend(SheetBackend):
 
 class McporterBackend(SheetBackend):
     def __init__(self, config: Dict[str, Any]):
-        self.file_id = str(config.get("file_id") or "").strip()
+        self.server = str(config.get("mcporter_server") or "kdocs-qclaw").strip()
         self.drive_id = str(config.get("drive_id") or "").strip()
+        self.file_id = str(config.get("file_id") or "").strip()
         self.sheet_id = str(config.get("sheet_id") or "").strip()
+        self.link_id = str(config.get("link_id") or DOC_LINK_ID).strip()
+        self.sheet_name = str(config.get("sheet_name") or SHEET_NAME).strip()
         self.api_index_base = int(config.get("api_index_base", config.get("index_base", 0)))
-        self.mcporter_cli = str(
+        cli = str(
             config.get("mcporter_cli")
             or os.environ.get("MCPORTER_CLI")
-            or "/Users/corazon/Library/Application Support/QClaw/npm-global/node_modules/mcporter/dist/cli.js"
+            or DEFAULT_MCPORTER_CLI
         )
-        if not self.file_id:
-            raise KDocsError("未能打开金山文档，请检查链接或授权状态：缺少 file_id。")
-        if not self.sheet_id:
-            raise KDocsError("未找到事项总表，请检查 sheet 名称是否一致：缺少 sheet_id。")
+        if not Path(cli).exists() and Path(LEGACY_MCPORTER_CLI).exists():
+            cli = LEGACY_MCPORTER_CLI
+        self.mcporter_cli = cli
+        if not Path(self.mcporter_cli).exists():
+            raise KDocsError(f"mcporter CLI not found: {self.mcporter_cli}")
+        if not self.server:
+            raise KDocsError("mcporter_server is required")
         if self.api_index_base != 0:
             raise KDocsError("kdocs sheet API 使用 0-based 坐标，请将 api_index_base/index_base 配置为 0 或移除该配置。")
+        self._resolve_file_and_sheet()
+
+    def _mcporter_call(self, tool: str, args: List[str]) -> subprocess.CompletedProcess[str]:
+        return run_cmd(["node", self.mcporter_cli, "call", self.server, tool, *args, "--output", "json"])
+
+    def _resolve_file_and_sheet(self) -> None:
+        if not self.file_id:
+            if not self.link_id:
+                raise KDocsError("未能打开金山文档，请检查链接或授权状态：缺少 file_id/link_id。")
+            proc = self._mcporter_call("get_share_info", [f"link_id={self.link_id}"])
+            if proc.returncode != 0:
+                raise KDocsError(f"未能打开金山文档，请检查链接或授权状态：{proc.stderr.strip() or proc.stdout.strip()}")
+            detail = response_detail(proc.stdout)
+            self.file_id = str(detail.get("file_id") or "").strip()
+            self.drive_id = str(detail.get("drive_id") or self.drive_id).strip()
+            if not self.file_id:
+                raise KDocsError("未能打开金山文档，请检查链接或授权状态：get_share_info 未返回 file_id。")
+
+        if not self.sheet_id:
+            proc = self._mcporter_call("sheet.get_sheets_info", [f"file_id={self.file_id}"])
+            if proc.returncode != 0:
+                raise KDocsError(f"未找到事项总表，请检查 sheet 名称是否一致：{proc.stderr.strip() or proc.stdout.strip()}")
+            detail = response_detail(proc.stdout)
+            sheets = detail.get("sheetsInfo")
+            if not isinstance(sheets, list):
+                raise KDocsError("未找到事项总表，请检查 sheet 名称是否一致：get_sheets_info 未返回 sheetsInfo。")
+            for sheet in sheets:
+                if isinstance(sheet, dict) and sheet.get("sheetName") == self.sheet_name:
+                    self.sheet_id = str(sheet.get("sheetId") or "").strip()
+                    break
+            if not self.sheet_id:
+                names = [str(s.get("sheetName")) for s in sheets if isinstance(s, dict)]
+                raise KDocsError(f"未找到事项总表，请检查 sheet 名称是否一致。当前 sheet：{'、'.join(names)}")
 
     @staticmethod
     def _to_api_index(visible_index: int) -> int:
@@ -165,21 +229,14 @@ class McporterBackend(SheetBackend):
         )
 
     def read_range(self, row_from: int, row_to: int, col_from: int, col_to: int) -> Dict[Tuple[int, int], str]:
-        cmd = [
-            "node",
-            self.mcporter_cli,
-            "call",
-            "--server",
-            "kdocs",
-            "--tool",
+        proc = self._mcporter_call(
             "sheet.get_range_data",
+            [
             f"file_id={self.file_id}",
             f"sheetId={self.sheet_id}",
             f"range={self._range_json(row_from, row_to, col_from, col_to)}",
-            "--output",
-            "json",
-        ]
-        proc = run_cmd(cmd)
+            ],
+        )
         if proc.returncode != 0:
             raise KDocsError(
                 f"读取金山文档失败：range=({row_from},{col_from})-({row_to},{col_to})；"
@@ -204,21 +261,14 @@ class McporterBackend(SheetBackend):
                     "formula": value,
                 }
             )
-        cmd = [
-            "node",
-            self.mcporter_cli,
-            "call",
-            "--server",
-            "kdocs",
-            "--tool",
+        proc = self._mcporter_call(
             "sheet.update_range_data",
+            [
             f"file_id={self.file_id}",
             f"sheetId={self.sheet_id}",
             "rangeData=" + json.dumps(range_data, ensure_ascii=False, separators=(",", ":")),
-            "--output",
-            "json",
-        ]
-        proc = run_cmd(cmd)
+            ],
+        )
         if proc.returncode != 0:
             raise KDocsError(
                 f"写入金山文档失败：target_row={row}, target_cols=1-{len(values)}；"
@@ -256,15 +306,19 @@ class KDocsClient:
 
     def next_number_and_row(self, cells: Dict[Tuple[int, int], str]) -> Tuple[str, int]:
         max_num = 0
+        number_width: Optional[int] = None
         last_row = self.header_row
         for row in range(self.header_row + 1, self.max_scan_rows + 1):
             row_values = [to_text(cells.get((row, col), "")).strip() for col in range(1, len(EXPECTED_HEADERS) + 1)]
             if any(row_values):
                 last_row = row
-            m = re.fullmatch(r"SX-(\d{4})", row_values[0] if row_values else "")
+            m = re.fullmatch(r"SX-(\d+)", row_values[0] if row_values else "")
             if m:
-                max_num = max(max_num, int(m.group(1)))
-        return f"SX-{max_num + 1:04d}", last_row + 1
+                digits = m.group(1)
+                number_width = max(number_width or 0, len(digits))
+                max_num = max(max_num, int(digits))
+        number_width = number_width or 4
+        return f"SX-{max_num + 1:0{number_width}d}", last_row + 1
 
     def add_item(self, draft: Dict[str, Any]) -> AddResult:
         cells = self.read_table_cells()
