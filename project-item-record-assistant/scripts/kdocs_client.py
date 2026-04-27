@@ -15,6 +15,8 @@ from parser import EXPECTED_HEADERS, tab_row
 DOC_NAME = "项目推进与留痕台账"
 DOC_LINK = "https://www.kdocs.cn/l/crcZHpAS41uj"
 SHEET_NAME = "事项总表"
+DEFAULT_HEADER_ROW = 2
+MAX_WRITE_COLUMNS = 100
 
 
 class KDocsError(RuntimeError):
@@ -47,7 +49,13 @@ def load_json_file(path: Path) -> Dict[str, Any]:
     return data
 
 
-def parse_range_cells(stdout: str, index_base: int = 1) -> Dict[Tuple[int, int], str]:
+def parse_range_cells(stdout: str) -> Dict[Tuple[int, int], str]:
+    """Parse kdocs 0-based API coordinates into visible spreadsheet coordinates.
+
+    The public client works with the row/column numbers users see in the sheet
+    UI: A1 is (1, 1). OpenClaw kdocs `sheet.*` APIs use 0-based rowFrom/colFrom
+    and return 0-based coordinates, so the conversion is always +1 here.
+    """
     raw = stdout.strip()
     if not raw:
         return {}
@@ -56,15 +64,21 @@ def parse_range_cells(stdout: str, index_base: int = 1) -> Dict[Tuple[int, int],
     except Exception as exc:
         raise KDocsError(f"cannot parse kdocs response as JSON: {exc}") from exc
 
-    range_data = (((data.get("data") or {}).get("detail") or {}).get("rangeData"))
+    range_data = (
+        (((data.get("data") or {}).get("detail") or {}).get("rangeData"))
+        or data.get("rangeData")
+        or ((data.get("detail") or {}).get("rangeData") if isinstance(data.get("detail"), dict) else None)
+    )
     cells: Dict[Tuple[int, int], str] = {}
     if isinstance(range_data, list):
         for cell in range_data:
             if not isinstance(cell, dict):
                 continue
             try:
-                row = int(cell.get("originRow")) + index_base
-                col = int(cell.get("originCol")) + index_base
+                api_row = cell.get("originRow", cell.get("rowFrom"))
+                api_col = cell.get("originCol", cell.get("colFrom"))
+                row = int(api_row) + 1
+                col = int(api_col) + 1
             except Exception:
                 continue
             value = (
@@ -118,7 +132,7 @@ class McporterBackend(SheetBackend):
         self.file_id = str(config.get("file_id") or "").strip()
         self.drive_id = str(config.get("drive_id") or "").strip()
         self.sheet_id = str(config.get("sheet_id") or "").strip()
-        self.index_base = int(config.get("index_base", 1))
+        self.api_index_base = int(config.get("api_index_base", config.get("index_base", 0)))
         self.mcporter_cli = str(
             config.get("mcporter_cli")
             or os.environ.get("MCPORTER_CLI")
@@ -128,16 +142,23 @@ class McporterBackend(SheetBackend):
             raise KDocsError("未能打开金山文档，请检查链接或授权状态：缺少 file_id。")
         if not self.sheet_id:
             raise KDocsError("未找到事项总表，请检查 sheet 名称是否一致：缺少 sheet_id。")
-        if self.index_base not in (0, 1):
-            raise KDocsError("index_base must be 0 or 1")
+        if self.api_index_base != 0:
+            raise KDocsError("kdocs sheet API 使用 0-based 坐标，请将 api_index_base/index_base 配置为 0 或移除该配置。")
+
+    @staticmethod
+    def _to_api_index(visible_index: int) -> int:
+        api_index = int(visible_index) - 1
+        if api_index < 0:
+            raise KDocsError(f"invalid visible row/col index: {visible_index}")
+        return api_index
 
     def _range_json(self, row_from: int, row_to: int, col_from: int, col_to: int) -> str:
         return json.dumps(
             {
-                "rowFrom": row_from - self.index_base,
-                "rowTo": row_to - self.index_base,
-                "colFrom": col_from - self.index_base,
-                "colTo": col_to - self.index_base,
+                "rowFrom": self._to_api_index(row_from),
+                "rowTo": self._to_api_index(row_to),
+                "colFrom": self._to_api_index(col_from),
+                "colTo": self._to_api_index(col_to),
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -160,14 +181,19 @@ class McporterBackend(SheetBackend):
         ]
         proc = run_cmd(cmd)
         if proc.returncode != 0:
-            raise KDocsError(f"读取金山文档失败：{proc.stderr.strip() or proc.stdout.strip()}")
-        return parse_range_cells(proc.stdout, index_base=self.index_base)
+            raise KDocsError(
+                f"读取金山文档失败：range=({row_from},{col_from})-({row_to},{col_to})；"
+                f"{proc.stderr.strip() or proc.stdout.strip()}"
+            )
+        return parse_range_cells(proc.stdout)
 
     def write_row(self, row: int, values: List[str]) -> None:
+        if len(values) > MAX_WRITE_COLUMNS:
+            raise KDocsError(f"写入列数超过限制：{len(values)} > {MAX_WRITE_COLUMNS}")
         range_data = []
-        row0 = row - self.index_base
+        row0 = self._to_api_index(row)
         for offset, value in enumerate(values):
-            col0 = offset + 1 - self.index_base
+            col0 = self._to_api_index(offset + 1)
             range_data.append(
                 {
                     "opType": "formula",
@@ -194,7 +220,10 @@ class McporterBackend(SheetBackend):
         ]
         proc = run_cmd(cmd)
         if proc.returncode != 0:
-            raise KDocsError(f"写入金山文档失败：{proc.stderr.strip() or proc.stdout.strip()}")
+            raise KDocsError(
+                f"写入金山文档失败：target_row={row}, target_cols=1-{len(values)}；"
+                f"{proc.stderr.strip() or proc.stdout.strip()}"
+            )
 
 
 @dataclass
@@ -204,18 +233,22 @@ class AddResult:
 
 
 class KDocsClient:
-    def __init__(self, backend: SheetBackend, max_scan_rows: int = 1000):
+    def __init__(self, backend: SheetBackend, max_scan_rows: int = 1000, header_row: int = DEFAULT_HEADER_ROW):
         self.backend = backend
         self.max_scan_rows = max_scan_rows
+        self.header_row = int(header_row)
+        if self.header_row < 1:
+            raise KDocsError("header_row must be >= 1")
 
     def read_table_cells(self) -> Dict[Tuple[int, int], str]:
         return self.backend.read_range(1, self.max_scan_rows, 1, len(EXPECTED_HEADERS))
 
     def validate_header(self, cells: Dict[Tuple[int, int], str]) -> List[str]:
-        actual = [to_text(cells.get((1, col), "")).strip() for col in range(1, len(EXPECTED_HEADERS) + 1)]
+        actual = [to_text(cells.get((self.header_row, col), "")).strip() for col in range(1, len(EXPECTED_HEADERS) + 1)]
         if actual != EXPECTED_HEADERS:
             raise KDocsError(
                 "事项总表字段与 Skill 配置不一致，请检查表头顺序。\n"
+                f"表头检查行：第 {self.header_row} 行\n"
                 f"当前识别到的表头：{'、'.join(actual)}\n"
                 f"期望表头：{'、'.join(EXPECTED_HEADERS)}"
             )
@@ -223,8 +256,8 @@ class KDocsClient:
 
     def next_number_and_row(self, cells: Dict[Tuple[int, int], str]) -> Tuple[str, int]:
         max_num = 0
-        last_row = 1
-        for row in range(2, self.max_scan_rows + 1):
+        last_row = self.header_row
+        for row in range(self.header_row + 1, self.max_scan_rows + 1):
             row_values = [to_text(cells.get((row, col), "")).strip() for col in range(1, len(EXPECTED_HEADERS) + 1)]
             if any(row_values):
                 last_row = row
@@ -244,12 +277,13 @@ class KDocsClient:
         return AddResult(number=number, row_number=row_number)
 
 
-def backend_from_args(backend_name: str, config_path: Optional[str] = None, mock_file: Optional[str] = None) -> Tuple[SheetBackend, int]:
+def backend_from_args(backend_name: str, config_path: Optional[str] = None, mock_file: Optional[str] = None) -> Tuple[SheetBackend, int, int]:
     config = load_json_file(Path(config_path).expanduser()) if config_path else {}
     max_scan_rows = int(config.get("max_scan_rows", 1000))
+    header_row = int(config.get("header_row", DEFAULT_HEADER_ROW))
     if backend_name == "mock":
         path = Path(mock_file or config.get("mock_file") or Path(__file__).resolve().parents[1] / "data" / "mock_kdocs.json")
-        return MockBackend(path), max_scan_rows
+        return MockBackend(path), max_scan_rows, header_row
     if backend_name == "mcporter":
-        return McporterBackend(config), max_scan_rows
+        return McporterBackend(config), max_scan_rows, header_row
     raise KDocsError(f"unsupported backend: {backend_name}")

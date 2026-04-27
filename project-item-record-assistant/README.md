@@ -20,9 +20,16 @@ python3 scripts/main.py cancel_draft --draft-id draft_xxxx
   "file_id": "金山文档 file_id",
   "drive_id": "",
   "sheet_id": "事项总表 sheetId",
+  "header_row": 2,
   "max_scan_rows": 1000,
+  "api_index_base": 0,
   "mcporter_cli": "/Users/corazon/Library/Application Support/QClaw/npm-global/node_modules/mcporter/dist/cli.js"
 }
 ```
+
+说明：
+- `header_row` 默认第 2 行，用于兼容第 1 行是表名称、第 2 行才是字段表头的台账。
+- `api_index_base` 固定为 `0`；OpenClaw kdocs `sheet.*` API 的 `rowFrom/colFrom` 是 0-based。
+- 脚本对外返回的行号仍是表格里看到的行号，例如写入第 3 行时 API 使用 `rowFrom=2`。
 
 确认写入时脚本会校验表头、读取已有编号、生成 `SX-xxxx`，并严格按 15 个字段追加到最后一行。没有配置 connector 时不会写入，会输出 tab 分隔备用行。

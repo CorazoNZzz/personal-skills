@@ -76,8 +76,10 @@ def cmd_confirm(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        backend, max_scan_rows = backend_from_args(args.backend, config_path=args.config or None, mock_file=args.mock_file or None)
-        result = KDocsClient(backend, max_scan_rows=max_scan_rows).add_item(draft)
+        backend, max_scan_rows, header_row = backend_from_args(
+            args.backend, config_path=args.config or None, mock_file=args.mock_file or None
+        )
+        result = KDocsClient(backend, max_scan_rows=max_scan_rows, header_row=header_row).add_item(draft)
     except KDocsError as exc:
         print(f"写入失败：{exc}")
         print("")
