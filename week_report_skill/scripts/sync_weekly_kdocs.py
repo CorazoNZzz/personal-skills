@@ -282,6 +282,27 @@ def merge_append(existing: str, incoming: str) -> str:
     return f"{old}\n{new}".strip()
 
 
+def _seq_ratio(a: str, b: str) -> float:
+    """Simple similarity ratio between two strings (0.0 - 1.0)."""
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    # Quick reject: length difference > 30% → cannot be similar enough
+    if max(len(a), len(b)) > min(len(a), len(b)) * 1.4:
+        return 0.0
+    try:
+        import difflib
+
+        return difflib.SequenceMatcher(None, a, b).ratio()
+    except Exception:
+        return 0.0
+
+
+def similarity_ratio(a: str, b: str) -> float:
+    return max(_seq_ratio(a, b), _seq_ratio(b, a))
+
+
 def normalize_lookup_text(raw: str) -> str:
     s = unicodedata.normalize("NFKC", to_text(raw)).lower()
     # Keep Chinese/letters/numbers, strip punctuation and spaces for robust matching.
@@ -312,17 +333,25 @@ def resolve_target_row(
         raise SkillError("either --target-row or --project-name is required")
 
     exact_matches: List[Tuple[int, str]] = []
-    fuzzy_matches: List[Tuple[int, str]] = []
+    ambiguous_fuzzy: List[Tuple[int, str]] = []
     cells = backend.get_column_cells(scan_row_from, scan_row_to, project_col)
     scanned = len(cells)
+
     for row, cell_text in cells:
         norm = normalize_lookup_text(cell_text)
         if not norm:
             continue
         if norm == desired:
             exact_matches.append((row, cell_text))
-        elif desired in norm or norm in desired:
-            fuzzy_matches.append((row, cell_text))
+        else:
+            # Use similarity ratio instead of simple containment.
+            # This prevents "X项目" from matching "X项目建设" or similar.
+            ratio = max(
+                similarity_ratio(desired, norm),
+                similarity_ratio(norm, desired),
+            )
+            if ratio >= 0.80:
+                ambiguous_fuzzy.append((row, cell_text))
 
     if len(exact_matches) == 1:
         row, val = exact_matches[0]
@@ -342,8 +371,8 @@ def resolve_target_row(
             + "; use --target-row to override"
         )
 
-    if len(fuzzy_matches) == 1:
-        row, val = fuzzy_matches[0]
+    if len(ambiguous_fuzzy) == 1:
+        row, val = ambiguous_fuzzy[0]
         return {
             "row": row,
             "mode": "auto-project-name-fuzzy",
@@ -353,10 +382,10 @@ def resolve_target_row(
             "scan_row_from": scan_row_from,
             "scan_row_to": scan_row_to,
         }
-    if len(fuzzy_matches) > 1:
+    if len(ambiguous_fuzzy) > 1:
         raise SkillError(
             "project-name fuzzy match is ambiguous, candidates: "
-            + format_row_candidates(fuzzy_matches)
+            + format_row_candidates(ambiguous_fuzzy)
             + "; use --target-row to override"
         )
 
