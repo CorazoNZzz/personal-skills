@@ -1,0 +1,4 @@
+interface:
+  display_name: "项目事项记录助手"
+  short_description: "语音事项先成草稿，确认后追加写入金山事项总表"
+  default_prompt: "Use $project-item-record-assistant to turn my Chinese project voice note into a confirmed item draft, then append it to the KDocs item ledger only after I approve."
