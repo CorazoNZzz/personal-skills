@@ -10,7 +10,12 @@ from collections import Counter
 from pathlib import Path
 
 TABLE_FILES = [
+    'document_section.csv',
     'enterprise_profile.csv',
+    'section_summary.csv',
+    'outlet_overview.csv',
+    'issue_identification.csv',
+    'reduction_space_identification.csv',
     'organized_outlet.csv',
     'tank.csv',
     'loading.csv',
@@ -28,6 +33,10 @@ CHECK_FIELDS = [
     'record_type',
     'facility_name_raw',
     'facility_code',
+    'heading_text',
+    'section_content',
+    'section_name',
+    'item_text',
     'process_stage',
     'pollutant_category',
     'monitoring_method',
@@ -106,6 +115,11 @@ def main() -> int:
 
     record_files = set()
     for fn in [
+        'document_section.csv',
+        'section_summary.csv',
+        'outlet_overview.csv',
+        'issue_identification.csv',
+        'reduction_space_identification.csv',
         'organized_outlet.csv',
         'tank.csv',
         'loading.csv',
@@ -128,7 +142,17 @@ def main() -> int:
 
     organized_rows = loaded['organized_outlet.csv']
     loading_rows = loaded['loading.csv']
+    outlet_overview_rows = loaded['outlet_overview.csv']
+    document_section_rows = loaded['document_section.csv']
+    issue_rows = loaded['issue_identification.csv']
+    reduction_rows = loaded['reduction_space_identification.csv']
     report['hotspots'] = {
+        'document_section_missing_heading_top': top_missing_by_file(document_section_rows, 'heading_text'),
+        'document_section_missing_content_top': top_missing_by_file(document_section_rows, 'section_content'),
+        'outlet_overview_missing_total_count_top': top_missing_by_file(outlet_overview_rows, 'total_outlet_count'),
+        'outlet_overview_missing_elevated_count_top': top_missing_by_file(outlet_overview_rows, 'elevated_stack_50m_plus_count'),
+        'issue_identification_missing_item_top': top_missing_by_file(issue_rows, 'item_text'),
+        'reduction_space_missing_item_top': top_missing_by_file(reduction_rows, 'item_text'),
         'organized_missing_name_top': top_missing_by_file(organized_rows, 'facility_name_raw'),
         'organized_missing_code_top': top_missing_by_file(organized_rows, 'facility_code'),
         'loading_missing_process_stage_top': top_missing_by_file(loading_rows, 'process_stage'),

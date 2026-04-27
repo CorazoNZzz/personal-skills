@@ -1,4 +1,4 @@
 interface:
   display_name: "排口结构化抽取"
-  short_description: "从排口总结材料批量提取结构化数据并生成质检报告，支持完整性校验"
-  default_prompt: "Use $outlet-structured-extractor to extract structured outlet and facility records from a folder of Chinese enterprise .docx summary reports."
+  short_description: "从排口总结材料批量提取全文标题内容、企业概述、排气筒概况、问题识别、减排空间及附表明细"
+  default_prompt: "Use $outlet-structured-extractor to extract full document sections by heading, narrative summaries, outlet overviews, issue/reduction-space records, and appendix tables from a folder of Chinese enterprise .docx summary reports."
