@@ -384,6 +384,11 @@ class KDocsClient:
 
     def validate_header(self, cells: Dict[Tuple[int, int], str]) -> List[str]:
         actual = [to_text(cells.get((self.header_row, col), "")).strip() for col in range(1, len(EXPECTED_HEADERS) + 1)]
+        if not any(actual):
+            raise KDocsError(
+                "无法读取金山文档表格数据（可能触发了限流），已停止写入。"
+                "请稍等片刻后重新执行。"
+            )
         if actual != EXPECTED_HEADERS:
             raise KDocsError(
                 "事项总表字段与 Skill 配置不一致，请检查表头顺序。\n"
