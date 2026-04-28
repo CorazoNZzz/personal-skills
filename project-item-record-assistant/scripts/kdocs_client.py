@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -269,33 +270,43 @@ class McporterBackend(SheetBackend):
         )
 
     def read_range(self, row_from: int, row_to: int, col_from: int, col_to: int) -> Dict[Tuple[int, int], str]:
-        proc = self._mcporter_call(
-            "sheet.get_range_data",
-            [
-            f"file_id={self.file_id}",
-            f"sheetId={self.sheet_id}",
-            f"range={self._range_json(row_from, row_to, col_from, col_to)}",
-            ],
-        )
-        if proc.returncode != 0:
-            raise KDocsError(
-                f"读取金山文档失败：range=({row_from},{col_from})-({row_to},{col_to})；"
-                f"{proc.stderr.strip() or proc.stdout.strip()}"
+        """读取金山文档指定范围单元格"""
+        last_error = None
+        for attempt in range(3):  # 最多重试 3 次
+            proc = self._mcporter_call(
+                "sheet.get_range_data",
+                [
+                    f"file_id={self.file_id}",
+                    f"sheetId={self.sheet_id}",
+                    f"range={self._range_json(row_from, row_to, col_from, col_to)}",
+                ],
             )
-        # 检查 API 返回的 code 字段，识别 rate limit 等 API 层错误
-        try:
-            resp_data = json.loads(proc.stdout)
-            if resp_data.get("code") and resp_data.get("code") != 0:
+            if proc.returncode != 0:
                 raise KDocsError(
-                    f"读取金山文档失败（API error）：range=({row_from},{col_from})-({row_to},{col_to})；"
-                    f"{resp_data.get('message', proc.stdout[:200])}"
+                    f"读取金山文档失败（returncode={proc.returncode}）：range=({row_from},{col_from})-({row_to},{col_to})；"
+                    f"{proc.stderr.strip() or proc.stdout.strip()}"
                 )
-        except KDocsError:
-            raise
-        except Exception:
-            # JSON 解析失败（如非 JSON 响应），继续走 parse_range_cells
-            pass
-        return parse_range_cells(proc.stdout)
+            # 检查 API 返回的 code 字段
+            try:
+                resp_data = json.loads(proc.stdout)
+                if resp_data.get("code") and resp_data.get("code") != 0:
+                    last_error = resp_data
+                    if attempt < 2:  # 不是最后一次，休息一下再试
+                        time.sleep(2)
+                        continue
+                    # 最后一次仍然失败，抛有意义的错误
+                    raise KDocsError(
+                        f"读取金山文档失败（API error，尝试{attempt+1}次）：range=({row_from},{col_from})-({row_to},{col_to})；"
+                        f"{resp_data.get('message', proc.stdout[:200])}"
+                    )
+            except KDocsError:
+                raise
+            except Exception:
+                # JSON 解析失败，继续走 parse_range_cells
+                pass
+            return parse_range_cells(proc.stdout)
+        # 不应该到这里
+        raise KDocsError(f"读取金山文档失败（重试耗尽）：{last_error}")
 
     def write_row(self, row: int, values: List[str]) -> None:
         if len(values) > MAX_WRITE_COLUMNS:
