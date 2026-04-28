@@ -272,8 +272,12 @@ class McporterBackend(SheetBackend):
             separators=(",", ":"),
         )
 
-    def _read_single_range(self, row_from: int, row_to: int, col_from: int, col_to: int) -> Dict[Tuple[int, int], str]:
-        """Read a single range call. Returns cells dict on success, empty dict on truncation."""
+    def _read_single_range(self, row_from: int, row_to: int, col_from: int, col_to: int) -> Tuple[bool, Dict[Tuple[int, int], str]]:
+        """Read a single range call. Returns (was_truncated, cells_dict).
+        
+        - was_truncated=True: response was truncated, caller should retry with smaller batches.
+        - was_truncated=False: cells dict is reliable (may be empty if range has no data).
+        """
         last_error = None
         for attempt in range(3):  # 最多重试 3 次
             proc = self._mcporter_call(
@@ -308,22 +312,25 @@ class McporterBackend(SheetBackend):
                 # JSON 解析失败，继续走 parse_range_cells
                 pass
             json_ok, cells = parse_range_cells(proc.stdout)
-            return cells  # empty dict if truncated, cells if ok
+            if not json_ok:
+                # JSON was truncated, need smaller batch
+                return True, {}  # was_truncated=True, empty cells
+            return False, cells  # was_truncated=False, cells (may be empty if range is empty)
         # 不应该到这里
         raise KDocsError(f"读取金山文档失败（重试耗尽）：{last_error}")
 
     def read_range(self, row_from: int, row_to: int, col_from: int, col_to: int) -> Dict[Tuple[int, int], str]:
         """读取金山文档指定范围单元格。截断时自动分段多批次读取。"""
         # 尝试直接读取全范围
-        cells = self._read_single_range(row_from, row_to, col_from, col_to)
-        if cells:
+        was_truncated, cells = self._read_single_range(row_from, row_to, col_from, col_to)
+        if cells and not was_truncated:
             return cells
-        # 全范围返回空（可能是截断），分段读取，每段 30 行保证响应 < 60KB
-        BATCH_SIZE = 5  # 金山文档 /docx/cell/batch_get 响应截断阈值 ~60KB，实测 5 行安全
+        # 全范围返回空或被截断，分段读取
+        BATCH_SIZE = 3  # 金山文档 /docx/cell/batch_get 响应截断阈值 ~60KB，3行安全
         all_cells: Dict[Tuple[int, int], str] = {}
         for batch_start in range(row_from, row_to + 1, BATCH_SIZE):
             batch_end = min(batch_start + BATCH_SIZE - 1, row_to)
-            batch_cells = self._read_single_range(batch_start, batch_end, col_from, col_to)
+            _, batch_cells = self._read_single_range(batch_start, batch_end, col_from, col_to)
             all_cells.update(batch_cells)
         return all_cells
 
