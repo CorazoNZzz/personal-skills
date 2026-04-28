@@ -18,6 +18,8 @@ DOC_LINK_ID = "crcZHpAS41uj"
 SHEET_NAME = "事项总表"
 DEFAULT_HEADER_ROW = 2
 MAX_WRITE_COLUMNS = 100
+HEADER_DETECT_MAX_ROWS = 5
+HEADER_DETECT_MIN_MATCH = 3
 DEFAULT_MCPORTER_CLI = "/Users/corazon/Library/Application Support/QClaw/npm-global/lib/node_modules/mcporter/dist/cli.js"
 LEGACY_MCPORTER_CLI = "/Users/corazon/Library/Application Support/QClaw/npm-global/node_modules/mcporter/dist/cli.js"
 
@@ -64,8 +66,17 @@ def parse_range_cells(stdout: str) -> Dict[Tuple[int, int], str]:
         return {}
     try:
         data = json.loads(raw)
-    except Exception as exc:
-        raise KDocsError(f"cannot parse kdocs response as JSON: {exc}") from exc
+    except Exception:
+        # Large response (> 60 kchars) may have non-JSON framing.  Try to
+        # extract the JSON from the first '{' onward (same fallback as
+        # response_detail), and fall back to empty cells on failure.
+        brace_pos = raw.find("{")
+        if brace_pos == -1:
+            return {}
+        try:
+            data = json.loads(raw[brace_pos:])
+        except Exception:
+            return {}
 
     range_data = (
         (((data.get("data") or {}).get("detail") or {}).get("rangeData"))
@@ -99,13 +110,42 @@ def run_cmd(cmd: List[str]) -> subprocess.CompletedProcess[str]:
 
 
 def response_detail(stdout: str) -> Dict[str, Any]:
+    """Parse mcporter stdout as JSON and return the innermost detail dict.
+
+    Fault-tolerant: returns a safe default (code=0, detail={}) on parse
+    failure instead of raising, so callers that only check returncode are
+    not disrupted.
+    """
     raw = stdout.strip()
     if not raw:
         return {}
+
+    # Fast path: well-formed JSON fits in one parse.
     try:
         data = json.loads(raw)
-    except Exception as exc:
-        raise KDocsError(f"cannot parse kdocs response as JSON: {exc}") from exc
+    except Exception:
+        # Slow path: response is very large (> 60 kchars) and may contain
+        # non-JSON framing.  Try to extract the innermost result object.
+        #
+        # mcporter --output json emits a leading/trailing text banner before
+        # the actual JSON object.  We look for the first '{' and parse
+        # forward from there, ignoring everything before it.
+        brace_pos = raw.find("{")
+        if brace_pos == -1:
+            return {}  # no JSON structure at all
+
+        # Try to extract the JSON from the first '{' onward.
+        try:
+            data = json.loads(raw[brace_pos:])
+        except Exception:
+            # Last resort: look for a "code" field somewhere in the raw text.
+            code_match = re.search(r'"code"\s*:\s*(-?\d+)', raw)
+            msg_match = re.search(r'"message"\s*:\s*"([^"]{0,200})"', raw)
+            return {
+                "code": int(code_match.group(1)) if code_match else 0,
+                "message": msg_match.group(1) if msg_match else "",
+            }
+
     if not isinstance(data, dict):
         return {}
     inner = data.get("data")
@@ -274,6 +314,15 @@ class McporterBackend(SheetBackend):
                 f"写入金山文档失败：target_row={row}, target_cols=1-{len(values)}；"
                 f"{proc.stderr.strip() or proc.stdout.strip()}"
             )
+        # Even when the process exits cleanly, the API body may signal an error.
+        # fault-tolerant: detail will use the safe default if JSON parse fails.
+        detail = response_detail(proc.stdout)
+        if detail.get("code") and detail.get("code") != 0:
+            msg = detail.get("message") or detail.get("msg") or str(detail)
+            raise KDocsError(
+                f"写入金山文档失败（API error）：target_row={row}, target_cols=1-{len(values)}；"
+                f"{msg}"
+            )
 
 
 @dataclass
@@ -283,12 +332,39 @@ class AddResult:
 
 
 class KDocsClient:
-    def __init__(self, backend: SheetBackend, max_scan_rows: int = 1000, header_row: int = DEFAULT_HEADER_ROW):
+    def __init__(self, backend: SheetBackend, max_scan_rows: int = 1000, header_row: int = 0):
         self.backend = backend
         self.max_scan_rows = max_scan_rows
-        self.header_row = int(header_row)
+        if header_row > 0:
+            # Explicit header_row provided via config
+            self.header_row = int(header_row)
+        else:
+            # Auto-detect header row by scanning first few rows
+            self.header_row = self._detect_header_row()
         if self.header_row < 1:
             raise KDocsError("header_row must be >= 1")
+
+    def _detect_header_row(self) -> int:
+        """Scan the first few rows and find the one that best matches EXPECTED_HEADERS.
+
+        Returns the row number (1-indexed) with the highest match count.
+        If no row has at least HEADER_DETECT_MIN_MATCH matches, returns DEFAULT_HEADER_ROW.
+        """
+        cells = self.backend.read_range(1, HEADER_DETECT_MAX_ROWS, 1, len(EXPECTED_HEADERS))
+        best_row = DEFAULT_HEADER_ROW
+        best_count = 0
+        for row in range(1, HEADER_DETECT_MAX_ROWS + 1):
+            match_count = 0
+            for col_idx, expected in enumerate(EXPECTED_HEADERS, start=1):
+                actual = to_text(cells.get((row, col_idx), "")).strip()
+                if actual == expected:
+                    match_count += 1
+            if match_count > best_count:
+                best_count = match_count
+                best_row = row
+        if best_count < HEADER_DETECT_MIN_MATCH:
+            return DEFAULT_HEADER_ROW
+        return best_row
 
     def read_table_cells(self) -> Dict[Tuple[int, int], str]:
         return self.backend.read_range(1, self.max_scan_rows, 1, len(EXPECTED_HEADERS))
@@ -331,10 +407,11 @@ class KDocsClient:
         return AddResult(number=number, row_number=row_number)
 
 
-def backend_from_args(backend_name: str, config_path: Optional[str] = None, mock_file: Optional[str] = None) -> Tuple[SheetBackend, int, int]:
+def backend_from_args(backend_name: str, config_path: Optional[str] = None, mock_file: Optional[str] = None) -> Tuple[SheetBackend, int, Optional[int]]:
     config = load_json_file(Path(config_path).expanduser()) if config_path else {}
     max_scan_rows = int(config.get("max_scan_rows", 1000))
-    header_row = int(config.get("header_row", DEFAULT_HEADER_ROW))
+    # header_row=0 or missing means auto-detect; explicit value > 0 overrides auto-detection
+    header_row = int(config.get("header_row", 0))
     if backend_name == "mock":
         path = Path(mock_file or config.get("mock_file") or Path(__file__).resolve().parents[1] / "data" / "mock_kdocs.json")
         return MockBackend(path), max_scan_rows, header_row
