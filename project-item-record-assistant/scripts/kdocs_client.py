@@ -55,30 +55,8 @@ def load_json_file(path: Path) -> Dict[str, Any]:
     return data
 
 
-def parse_range_cells(stdout: str) -> Dict[Tuple[int, int], str]:
-    """Parse kdocs 0-based API coordinates into visible spreadsheet coordinates.
-
-    The public client works with the row/column numbers users see in the sheet
-    UI: A1 is (1, 1). OpenClaw kdocs `sheet.*` APIs use 0-based rowFrom/colFrom
-    and return 0-based coordinates, so the conversion is always +1 here.
-    """
-    raw = stdout.strip()
-    if not raw:
-        return {}
-    try:
-        data = json.loads(raw)
-    except Exception:
-        # Large response (> 60 kchars) may have non-JSON framing.  Try to
-        # extract the JSON from the first '{' onward (same fallback as
-        # response_detail), and fall back to empty cells on failure.
-        brace_pos = raw.find("{")
-        if brace_pos == -1:
-            return {}
-        try:
-            data = json.loads(raw[brace_pos:])
-        except Exception:
-            return {}
-
+def _extract_cells_from_data(data: Dict[str, Any]) -> Dict[Tuple[int, int], str]:
+    """Extract cell data from a parsed JSON response."""
     range_data = (
         (((data.get("data") or {}).get("detail") or {}).get("rangeData"))
         or data.get("rangeData")
@@ -104,6 +82,31 @@ def parse_range_cells(stdout: str) -> Dict[Tuple[int, int], str]:
             )
             cells[(row, col)] = value
     return cells
+
+
+def parse_range_cells(stdout: str) -> tuple[bool, Dict[Tuple[int, int], str]]:
+    """Parse kdocs 0-based API coordinates into visible spreadsheet coordinates.
+
+    Returns (json_was_complete, cells_dict).
+    - json_was_complete=True means the JSON parsed successfully and cells are reliable.
+    - json_was_complete=False means the response was truncated; cells is empty,
+      and the caller should retry with smaller batches.
+
+    The public client works with the row/column numbers users see in the sheet
+    UI: A1 is (1, 1). OpenClaw kdocs `sheet.*` APIs use 0-based rowFrom/colFrom
+    and return 0-based coordinates, so the conversion is always +1 here.
+    """
+    raw = stdout.strip()
+    if not raw:
+        return True, {}
+    try:
+        data = json.loads(raw)
+        return True, _extract_cells_from_data(data)
+    except Exception:
+        # Large response (> 60 kchars) truncated by response_detail or mcporter.
+        # Signal truncation: don't try regex (it causes mis-alignment),
+        # let the caller retry with smaller batches.
+        return False, {}
 
 
 def run_cmd(cmd: List[str]) -> subprocess.CompletedProcess[str]:
@@ -269,8 +272,8 @@ class McporterBackend(SheetBackend):
             separators=(",", ":"),
         )
 
-    def read_range(self, row_from: int, row_to: int, col_from: int, col_to: int) -> Dict[Tuple[int, int], str]:
-        """读取金山文档指定范围单元格"""
+    def _read_single_range(self, row_from: int, row_to: int, col_from: int, col_to: int) -> Dict[Tuple[int, int], str]:
+        """Read a single range call. Returns cells dict on success, empty dict on truncation."""
         last_error = None
         for attempt in range(3):  # 最多重试 3 次
             proc = self._mcporter_call(
@@ -304,9 +307,25 @@ class McporterBackend(SheetBackend):
             except Exception:
                 # JSON 解析失败，继续走 parse_range_cells
                 pass
-            return parse_range_cells(proc.stdout)
+            json_ok, cells = parse_range_cells(proc.stdout)
+            return cells  # empty dict if truncated, cells if ok
         # 不应该到这里
         raise KDocsError(f"读取金山文档失败（重试耗尽）：{last_error}")
+
+    def read_range(self, row_from: int, row_to: int, col_from: int, col_to: int) -> Dict[Tuple[int, int], str]:
+        """读取金山文档指定范围单元格。截断时自动分段多批次读取。"""
+        # 尝试直接读取全范围
+        cells = self._read_single_range(row_from, row_to, col_from, col_to)
+        if cells:
+            return cells
+        # 全范围返回空（可能是截断），分段读取，每段 30 行保证响应 < 60KB
+        BATCH_SIZE = 5  # 金山文档 /docx/cell/batch_get 响应截断阈值 ~60KB，实测 5 行安全
+        all_cells: Dict[Tuple[int, int], str] = {}
+        for batch_start in range(row_from, row_to + 1, BATCH_SIZE):
+            batch_end = min(batch_start + BATCH_SIZE - 1, row_to)
+            batch_cells = self._read_single_range(batch_start, batch_end, col_from, col_to)
+            all_cells.update(batch_cells)
+        return all_cells
 
     def write_row(self, row: int, values: List[str]) -> None:
         if len(values) > MAX_WRITE_COLUMNS:
