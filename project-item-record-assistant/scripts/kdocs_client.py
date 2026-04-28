@@ -282,6 +282,19 @@ class McporterBackend(SheetBackend):
                 f"读取金山文档失败：range=({row_from},{col_from})-({row_to},{col_to})；"
                 f"{proc.stderr.strip() or proc.stdout.strip()}"
             )
+        # 检查 API 返回的 code 字段，识别 rate limit 等 API 层错误
+        try:
+            resp_data = json.loads(proc.stdout)
+            if resp_data.get("code") and resp_data.get("code") != 0:
+                raise KDocsError(
+                    f"读取金山文档失败（API error）：range=({row_from},{col_from})-({row_to},{col_to})；"
+                    f"{resp_data.get('message', proc.stdout[:200])}"
+                )
+        except KDocsError:
+            raise
+        except Exception:
+            # JSON 解析失败（如非 JSON 响应），继续走 parse_range_cells
+            pass
         return parse_range_cells(proc.stdout)
 
     def write_row(self, row: int, values: List[str]) -> None:
