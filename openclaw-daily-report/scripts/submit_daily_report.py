@@ -490,7 +490,7 @@ def api_login(api_base: str, username: str, password: str, timeout: int = 30) ->
             raw_text=resp.text,
         )
 
-    if not isinstance(payload, dict) or payload.get("code") != 200:
+    if not isinstance(payload, dict) or payload.get("code") not in (0, 200):
         raise ApiRequestError("login returned non-success code", status_code=resp.status_code, payload=payload)
 
     token = ((payload.get("data") or {}).get("access_token") or "").strip()
@@ -673,7 +673,7 @@ def api_get_my_projects(api_base: str, token: str, timeout: int = 30) -> List[Di
             payload=payload,
             raw_text=resp.text,
         )
-    if not isinstance(payload, dict) or payload.get("code") != 200:
+    if not isinstance(payload, dict) or payload.get("code") not in (0, 200):
         raise ApiRequestError("my-projects returned non-success code", status_code=resp.status_code, payload=payload)
     return payload.get("data") or []
 
@@ -825,7 +825,7 @@ def api_submit_batch(api_base: str, token: str, payload: Dict[str, Any], timeout
             payload=result,
             raw_text=resp.text,
         )
-    if not isinstance(result, dict) or result.get("code") != 200:
+    if not isinstance(result, dict) or result.get("code") not in (0, 200):
         raise ApiRequestError("submit returned non-success code", status_code=resp.status_code, payload=result)
     return result
 
