@@ -184,11 +184,22 @@ def load_entries(entries_file: Path) -> List[Dict[str, Any]]:
     data = json.loads(entries_file.read_text(encoding="utf-8-sig"))
     if not isinstance(data, list):
         raise ValueError("entries file must be a JSON array")
+    # Field name alias: user-friendly names -> internal canonical names
+    FIELD_ALIAS = {
+        "project":          "project_name",
+        "content":          "progress_content",
+        "hours":            "work_hours",
+        "risks":            "risks_issues",
+    }
     out: List[Dict[str, Any]] = []
     for item in data:
         if not isinstance(item, dict):
             raise ValueError("each entry must be a JSON object")
-        out.append(item)
+        entry = dict(item)
+        for alias, canonical in FIELD_ALIAS.items():
+            if alias in entry and canonical not in entry:
+                entry[canonical] = entry[alias]
+        out.append(entry)
     return out
 
 
