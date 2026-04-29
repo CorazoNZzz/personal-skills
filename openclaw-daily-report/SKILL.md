@@ -13,6 +13,7 @@ description: 将自然语言工作内容自动转换为“日报管理-日报列
 1. 必须有可用的 `api_base`（例如 `https://xxx/api` 或 `http://127.0.0.1:8000/api`）。
 2. 不允许默认猜测 `localhost:8000`，也不需要先做端口探测（`netstat`/浏览器试探）。
 3. 若未显式传 `--api-base`，脚本会从 `.local-secrets.json` 的 `api_base` 读取；仍缺失则直接报错并要求补配置。
+4. macOS 上使用 `python3` 执行脚本；Chrome token 自动扫描默认读取 `~/Library/Application Support/Google/Chrome/<profile>/Local Storage/leveldb`。
 
 ## 工作流
 
@@ -98,7 +99,7 @@ description: 将自然语言工作内容自动转换为“日报管理-日报列
 示例：
 
 ```bash
-python scripts/submit_daily_report.py \
+python3 scripts/submit_daily_report.py \
   --api-base https://your-host/api \
   --entries-file data/today_entries.json \
   --credentials-file .local-secrets.json \
@@ -136,6 +137,8 @@ python scripts/submit_daily_report.py \
 - 推荐优先传 `project_id`，可避免中英文引号等字符差异导致的匹配失败。
 - 脚本支持“语音简称”智能匹配（如“余姚项目”“慈溪二期”）；若你有固定口语别名，建议维护 alias 文件。
 - 脚本默认开启 token 自动刷新：遇到 401 会尝试重新从 Chrome localStorage 取 token 并重试一次。
+- Chrome token 自动扫描支持 macOS、Windows 和 Linux 默认路径。macOS 默认 profile 通常是 `Default`，如果实际使用 `Profile 1` 等目录，传 `--chrome-profile "Profile 1"`。
+- 若 Chrome 用户数据目录不是默认位置，可设置 `OPENCLAW_CHROME_USER_DATA_DIR` 指向 Chrome user data 目录。
 - 脚本默认会对超时/连接失败/429/5xx 做退避重试（参数：`--max-retries`、`--retry-backoff-seconds`）。
 - `origin-hint` 默认自动使用 `--api-base` 的域名，不传也可以；只有跨域场景再手工指定。
 - 可选 `--expected-user` 用于避免多账号时误提（校验 JWT 中的 `username/sub`）。
@@ -152,7 +155,7 @@ python scripts/submit_daily_report.py \
 }
 ```
 
-- 若使用环境变量模式，不要把密码写进命令行或 skill 文件，建议先在终端设置：`OPENCLAW_DAILY_REPORT_PASSWORD=你的密码`。
+- 若使用环境变量模式，不要把密码写进命令行或 skill 文件。macOS/zsh 示例：`export OPENCLAW_DAILY_REPORT_PASSWORD="你的密码"`。
 
 `project_aliases.json` 示例：
 

@@ -35,19 +35,46 @@ class ApiRequestError(Exception):
 
 
 def iter_chrome_leveldb_files(profile: str = "Default") -> List[Path]:
-    local_app_data = os.environ.get("LOCALAPPDATA", "")
-    if not local_app_data:
-        return []
-    leveldb = (
-        Path(local_app_data)
-        / "Google"
-        / "Chrome"
-        / "User Data"
-        / profile
-        / "Local Storage"
-        / "leveldb"
-    )
-    if not leveldb.exists():
+    profile = profile or "Default"
+    leveldb_dirs: List[Path] = []
+
+    user_data_dir = os.environ.get("OPENCLAW_CHROME_USER_DATA_DIR") or os.environ.get("CHROME_USER_DATA_DIR")
+    if user_data_dir:
+        leveldb_dirs.append(Path(user_data_dir).expanduser() / profile / "Local Storage" / "leveldb")
+
+    if sys.platform == "darwin":
+        leveldb_dirs.append(
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "Google"
+            / "Chrome"
+            / profile
+            / "Local Storage"
+            / "leveldb"
+        )
+    elif sys.platform.startswith("win"):
+        local_app_data = os.environ.get("LOCALAPPDATA", "")
+        if local_app_data:
+            leveldb_dirs.append(
+                Path(local_app_data)
+                / "Google"
+                / "Chrome"
+                / "User Data"
+                / profile
+                / "Local Storage"
+                / "leveldb"
+            )
+    else:
+        leveldb_dirs.extend(
+            [
+                Path.home() / ".config" / "google-chrome" / profile / "Local Storage" / "leveldb",
+                Path.home() / ".config" / "chromium" / profile / "Local Storage" / "leveldb",
+            ]
+        )
+
+    leveldb = next((p for p in leveldb_dirs if p.exists()), None)
+    if not leveldb:
         return []
     files = sorted(
         [p for p in leveldb.iterdir() if p.suffix in {".log", ".ldb"}],
@@ -523,15 +550,22 @@ def try_refresh_token_via_login(
     login_username: str,
     password_env: str,
     expected_user: Optional[str],
+    failure_reasons: Optional[List[str]] = None,
 ) -> Optional[str]:
     username = (login_username or "").strip()
     if not username:
+        if failure_reasons is not None:
+            failure_reasons.append("login fallback skipped: missing login_username")
         return None
     password = read_password_from_env(password_env)
     if not password:
+        if failure_reasons is not None:
+            failure_reasons.append(f"login fallback skipped: missing password in {password_env}")
         return None
     new_token = api_login(api_base=api_base, username=username, password=password)
     if not new_token or new_token == current_token:
+        if failure_reasons is not None:
+            failure_reasons.append("login fallback did not return a new token")
         return None
     if expected_user and not token_matches_expected_user(new_token, expected_user):
         raise ValueError(
@@ -566,6 +600,7 @@ def call_with_resilience(
         except Exception as err:
             # 1) Auth failure: refresh token from Chrome and retry once.
             if auto_refresh_token and is_auth_error(err) and not refreshed_once:
+                auth_refresh_failure_reasons: List[str] = []
                 new_token = try_refresh_token_from_chrome(
                     current_token=current_token,
                     chrome_profile=chrome_profile,
@@ -573,18 +608,38 @@ def call_with_resilience(
                     expected_user=expected_user,
                 )
                 if not new_token:
+                    auth_refresh_failure_reasons.append("Chrome token refresh did not find a new usable token")
+                if not new_token:
                     new_token = try_refresh_token_via_login(
                         current_token=current_token,
                         api_base=api_base,
                         login_username=login_username,
                         password_env=password_env,
                         expected_user=expected_user,
+                        failure_reasons=auth_refresh_failure_reasons,
                     )
                 if new_token:
                     refreshed_once = True
                     current_token = new_token
                     print(f"[retry] {fn_name}: token refreshed after auth failure", file=sys.stderr)
                     continue
+                print(
+                    f"ERROR: {fn_name}: API returned auth failure and token auto-refresh could not get a new token.",
+                    file=sys.stderr,
+                )
+                print(
+                    "  - If you expect to use Chrome token refresh, log in to the project management system in Chrome.",
+                    file=sys.stderr,
+                )
+                print(
+                    "  - If you expect to use login fallback, configure login_username and password in "
+                    ".local-secrets.json.",
+                    file=sys.stderr,
+                )
+                if auth_refresh_failure_reasons:
+                    print("  Details:", file=sys.stderr)
+                    for reason in auth_refresh_failure_reasons:
+                        print(f"  - {reason}", file=sys.stderr)
 
             # 2) Transient failure: retry with backoff.
             if is_transient_error(err) and attempt < max_retries:

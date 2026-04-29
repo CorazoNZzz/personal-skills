@@ -99,7 +99,7 @@ url = f"{api_base.rstrip('/')}/v1/auth/login"
 |--------|------|------|
 | 🔴 高 | `/api/v1` 前缀不一致 | 合同规定所有日报接口前缀为 `/api/v1`，但脚本拼接路径时用的是 `/v1`，如果 `api_base` 不包含 `/api` 会导致 404。建议：始终在拼接日报接口 URL 时显式加上 `/api` 前缀，或在文档中明确 `api_base` 必须以 `/api` 结尾。 |
 | 🟡 中 | 查询列表接口未实现 | `/api/v1/daily-reports`（GET）脚本中未实现，仅在合同中标注"可选"，不影响提交核心功能。 |
-| 🟢 低 | Token 来源依赖 Chrome | 脚本默认从 Chrome localStorage LevelDB 扫描 token，Mac 上 Chrome 数据在 `~/Library/Application Support/Google/Chrome/`，但 LevelDB 路径依赖 `LOCALAPPDATA`（Windows 环境变量），Mac 上该变量为空，会导致 `iter_chrome_leveldb_files` 返回空列表，token 扫描失效。**仅影响 Mac 上的无参调用**（有 token 参数或 login 参数则不受影响）。 |
+| ✅ 已修复 | Token 来源依赖 Chrome | 脚本默认从 Chrome localStorage LevelDB 扫描 token，现已支持 macOS、Windows、Linux 默认路径，并支持用 `OPENCLAW_CHROME_USER_DATA_DIR` 覆盖 Chrome user data 目录。 |
 
 ---
 
@@ -118,12 +118,11 @@ def _daily_reports_url(api_base: str, path: str) -> str:
     return f"{base}/v1/daily-reports{path}"
 ```
 
-### 2. 修复 Mac Chrome LevelDB 路径（低优先级）
+### 2. Mac Chrome LevelDB 路径（已修复）
 
-`iter_chrome_leveldb_files()` 依赖 Windows 环境变量 `LOCALAPPDATA`，Mac 上应使用：
+`iter_chrome_leveldb_files()` 已支持 macOS 默认路径：
 ```python
-# Mac
-leveldb = Path.home() / "Library/Application Support/Google/Chrome/User Data/{profile}/Local Storage/leveldb"
+leveldb = Path.home() / "Library/Application Support/Google/Chrome/{profile}/Local Storage/leveldb"
 ```
 
 ### 3. 补充查询列表接口（如需核验功能）

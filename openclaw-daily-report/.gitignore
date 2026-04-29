@@ -1,0 +1,3 @@
+.local-secrets.json
+__pycache__/
+*.pyc

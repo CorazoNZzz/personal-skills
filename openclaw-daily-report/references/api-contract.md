@@ -77,11 +77,12 @@
 - 能力：
   - `api_base` 必填（`--api-base` 或 `.local-secrets.json` 的 `api_base`）
   - 不再默认猜测 `localhost:8000`，避免误探测错误环境
-  - 自动尝试从 Chrome localStorage leveldb 扫描 JWT
+  - 自动尝试从 Chrome localStorage leveldb 扫描 JWT（支持 macOS、Windows、Linux 默认 Chrome 路径）
   - 候选 token 会按 JWT `exp` 过期时间优先排序（优先选未过期 token）
   - 支持 `--expected-user` 校验 token 身份（防止多账号误提交）
   - 支持 `--credentials-file`（或自动读取技能目录下 `.local-secrets.json`）加载登录账号/密码
   - 当 Chrome 无登录态时，可用 `--login-username` + `--password-env` 调 `/v1/auth/login` 获取 token
+  - 可用 `OPENCLAW_CHROME_USER_DATA_DIR` 覆盖 Chrome user data 目录；macOS 默认读取 `~/Library/Application Support/Google/Chrome/<profile>/Local Storage/leveldb`
   - 调 `my-projects` 做项目名映射
   - 支持 entries 显式传 `project_id`（优先于项目名）
   - 项目名匹配会做标准化（中英文引号/全角差异）
