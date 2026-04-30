@@ -709,6 +709,41 @@ def api_get_my_projects(api_base: str, token: str, timeout: int = 30) -> List[Di
     return payload.get("data") or []
 
 
+def api_query_daily_reports(
+    api_base: str,
+    token: str,
+    report_date: str,
+    page: int = 1,
+    page_size: int = 50,
+    timeout: int = 30,
+) -> Dict[str, Any]:
+    url = f"{api_base.rstrip('/')}/v1/daily-reports"
+    params = {"date": report_date, "page": page, "page_size": page_size}
+    try:
+        resp = requests.get(url, headers=auth_headers(token), params=params, timeout=timeout)
+    except requests.RequestException as e:
+        raise e
+    try:
+        payload = resp.json()
+    except Exception:
+        payload = None
+
+    if resp.status_code >= 400:
+        raise ApiRequestError(
+            f"query-daily-reports failed [{resp.status_code}]",
+            status_code=resp.status_code,
+            payload=payload,
+            raw_text=resp.text,
+        )
+    if not isinstance(payload, dict) or payload.get("code") not in (0, 200):
+        raise ApiRequestError(
+            "query-daily-reports returned non-success code",
+            status_code=resp.status_code,
+            payload=payload,
+        )
+    return payload.get("data") or {}
+
+
 def merge_other_entries(other_entries: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not other_entries:
         return None
@@ -861,6 +896,105 @@ def api_submit_batch(api_base: str, token: str, payload: Dict[str, Any], timeout
     return result
 
 
+def verify_submission(
+    api_base: str,
+    token: str,
+    report_date: str,
+    submitted_entries: List[Dict[str, Any]],
+    auto_refresh_token: bool,
+    chrome_profile: str,
+    origin_hint: Optional[str],
+    expected_user: Optional[str],
+    login_username: str,
+    password_env: str,
+    max_retries: int,
+    retry_backoff_seconds: float,
+) -> None:
+    """Fetch all daily-report records for the given date and verify submitted entries are present."""
+    all_items: List[Dict[str, Any]] = []
+    page = 1
+    page_size = 50
+
+    def fetch_page(t: str) -> Dict[str, Any]:
+        return api_query_daily_reports(
+            api_base=api_base,
+            token=t,
+            report_date=report_date,
+            page=page,
+            page_size=page_size,
+        )
+
+    try:
+        data, _ = call_with_resilience(
+            fn_name="query-daily-reports",
+            fn=fetch_page,
+            token=token,
+            max_retries=max_retries,
+            retry_backoff_seconds=retry_backoff_seconds,
+            auto_refresh_token=auto_refresh_token,
+            chrome_profile=chrome_profile,
+            origin_hint=origin_hint,
+            expected_user=expected_user,
+            api_base=api_base,
+            login_username=login_username,
+            password_env=password_env,
+        )
+    except Exception as err:
+        print(f"\n⚠️  验证失败（查询出错）: {err}", file=sys.stderr)
+        return
+
+    total = data.get("total", 0)
+    items = data.get("items") or []
+    all_items.extend(items)
+
+    while page * page_size < total:
+        page += 1
+
+        def fetch_page_n(t: str) -> Dict[str, Any]:
+            return api_query_daily_reports(
+                api_base=api_base,
+                token=t,
+                report_date=report_date,
+                page=page,
+                page_size=page_size,
+            )
+
+        try:
+            data, _ = call_with_resilience(
+                fn_name="query-daily-reports",
+                fn=fetch_page_n,
+                token=token,
+                max_retries=max_retries,
+                retry_backoff_seconds=retry_backoff_seconds,
+                auto_refresh_token=auto_refresh_token,
+                chrome_profile=chrome_profile,
+                origin_hint=origin_hint,
+                expected_user=expected_user,
+                api_base=api_base,
+                login_username=login_username,
+                password_env=password_env,
+            )
+        except Exception as err:
+            print(f"\n⚠️  验证部分失败（第 {page} 页查询出错）: {err}", file=sys.stderr)
+            break
+
+        items = data.get("items") or []
+        all_items.extend(items)
+
+    # Filter current user's records
+    my_items = [i for i in all_items if i.get("employee_name") == "刘一彬"]
+    submitted_count = len(submitted_entries)
+    verified_count = len(my_items)
+
+    print(f"\n📋 提交验证:")
+    print(f"   提交条目数: {submitted_count}")
+    print(f"   平台记录数: {verified_count}")
+    if submitted_count == verified_count:
+        print("   ✅ 条目数匹配")
+    else:
+        print(f"   ⚠️  条目数不匹配（差 {abs(submitted_count - verified_count)} 条）")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Build and submit daily reports to /api/v1/daily-reports/batch"
@@ -919,6 +1053,19 @@ def parse_args() -> argparse.Namespace:
         "--project-aliases-file",
         default="",
         help="Optional JSON file mapping spoken aliases to project_id or canonical project_name",
+    )
+    parser.add_argument(
+        "--verify",
+        dest="verify",
+        action="store_true",
+        default=True,
+        help="Enable post-submit verification via GET /v1/daily-reports query API (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-verify",
+        dest="verify",
+        action="store_false",
+        help="Disable post-submit verification",
     )
     return parser.parse_args()
 
@@ -1060,6 +1207,23 @@ def main() -> int:
     )
     print("submit result:")
     print(json.dumps(result, ensure_ascii=False, indent=2))
+
+    if args.verify:
+        verify_submission(
+            api_base=api_base,
+            token=token,
+            report_date=args.report_date,
+            submitted_entries=payload["reports"],
+            auto_refresh_token=auto_refresh_token,
+            chrome_profile=args.chrome_profile,
+            origin_hint=origin_hint,
+            expected_user=expected_user or None,
+            login_username=login_username,
+            password_env=password_env,
+            max_retries=args.max_retries,
+            retry_backoff_seconds=args.retry_backoff_seconds,
+        )
+
     return 0
 
 
