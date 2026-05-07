@@ -142,7 +142,7 @@ def token_matches_expected_user(token: str, expected_user: Optional[str]) -> boo
         return True
     payload = get_unverified_jwt_payload(token) or {}
     candidates: List[str] = []
-    for key in ("username", "user_name", "name", "real_name", "sub"):
+    for key in ("username", "user_name", "name", "real_name", "employee_name", "sub"):
         value = payload.get(key)
         if value is None:
             continue
@@ -496,6 +496,31 @@ def read_password_from_env(env_name: str) -> str:
     return value.strip()
 
 
+def resolve_login_password(password_env: str, credentials: Dict[str, Any]) -> Tuple[str, str]:
+    env_password = read_password_from_env(password_env)
+    if env_password:
+        return env_password, f"env:{password_env}"
+
+    cred_password = credentials.get("password")
+    if cred_password is not None and str(cred_password).strip():
+        return str(cred_password).strip(), "credentials:password"
+
+    return "", ""
+
+
+def resolve_current_employee_name(token: str, expected_user: Optional[str]) -> Optional[str]:
+    expected = to_non_empty_text(expected_user)
+    if expected:
+        return expected
+
+    payload = get_unverified_jwt_payload(token) or {}
+    for key in ("employee_name", "real_name", "name", "username", "user_name", "sub"):
+        value = to_non_empty_text(payload.get(key))
+        if value:
+            return value
+    return None
+
+
 def api_login(api_base: str, username: str, password: str, timeout: int = 30) -> str:
     url = f"{api_base.rstrip('/')}/v1/auth/login"
     try:
@@ -580,6 +605,7 @@ def try_refresh_token_via_login(
     api_base: str,
     login_username: str,
     password_env: str,
+    login_password: str,
     expected_user: Optional[str],
     failure_reasons: Optional[List[str]] = None,
 ) -> Optional[str]:
@@ -588,10 +614,12 @@ def try_refresh_token_via_login(
         if failure_reasons is not None:
             failure_reasons.append("login fallback skipped: missing login_username")
         return None
-    password = read_password_from_env(password_env)
+    password = (login_password or "").strip() or read_password_from_env(password_env)
     if not password:
         if failure_reasons is not None:
-            failure_reasons.append(f"login fallback skipped: missing password in {password_env}")
+            failure_reasons.append(
+                f"login fallback skipped: missing password in credentials.password or {password_env}"
+            )
         return None
     new_token = api_login(api_base=api_base, username=username, password=password)
     if not new_token or new_token == current_token:
@@ -619,6 +647,7 @@ def call_with_resilience(
     api_base: str,
     login_username: str,
     password_env: str,
+    login_password: str,
 ):
     attempt = 0
     current_token = token
@@ -646,6 +675,7 @@ def call_with_resilience(
                         api_base=api_base,
                         login_username=login_username,
                         password_env=password_env,
+                        login_password=login_password,
                         expected_user=expected_user,
                         failure_reasons=auth_refresh_failure_reasons,
                     )
@@ -713,12 +743,20 @@ def api_query_daily_reports(
     api_base: str,
     token: str,
     report_date: str,
+    employee_name: Optional[str] = None,
     page: int = 1,
     page_size: int = 50,
     timeout: int = 30,
 ) -> Dict[str, Any]:
     url = f"{api_base.rstrip('/')}/v1/daily-reports"
-    params = {"date": report_date, "page": page, "page_size": page_size}
+    params: Dict[str, Any] = {
+        "start_date": report_date,
+        "end_date": report_date,
+        "page": page,
+        "page_size": page_size,
+    }
+    if employee_name:
+        params["employee_name"] = employee_name
     try:
         resp = requests.get(url, headers=auth_headers(token), params=params, timeout=timeout)
     except requests.RequestException as e:
@@ -742,6 +780,99 @@ def api_query_daily_reports(
             payload=payload,
         )
     return payload.get("data") or {}
+
+
+def extract_query_items(data: Any) -> Tuple[List[Dict[str, Any]], Optional[int]]:
+    if isinstance(data, list):
+        return [i for i in data if isinstance(i, dict)], len(data)
+    if not isinstance(data, dict):
+        return [], 0
+
+    raw_items = None
+    for key in ("items", "records", "list", "results"):
+        if isinstance(data.get(key), list):
+            raw_items = data.get(key)
+            break
+    if raw_items is None and isinstance(data.get("data"), list):
+        raw_items = data.get("data")
+    items = [i for i in (raw_items or []) if isinstance(i, dict)]
+
+    raw_total = data.get("total")
+    if raw_total is None:
+        raw_total = data.get("count")
+    try:
+        total = int(raw_total) if raw_total is not None else None
+    except Exception:
+        total = None
+    return items, total
+
+
+def fetch_daily_reports_for_date(
+    api_base: str,
+    token: str,
+    report_date: str,
+    employee_name: Optional[str],
+    auto_refresh_token: bool,
+    chrome_profile: str,
+    origin_hint: Optional[str],
+    expected_user: Optional[str],
+    login_username: str,
+    password_env: str,
+    login_password: str,
+    max_retries: int,
+    retry_backoff_seconds: float,
+) -> Tuple[List[Dict[str, Any]], str]:
+    all_items: List[Dict[str, Any]] = []
+    page = 1
+    page_size = 50
+    current_token = token
+
+    while True:
+        current_page = page
+
+        def fetch_page(t: str) -> Dict[str, Any]:
+            return api_query_daily_reports(
+                api_base=api_base,
+                token=t,
+                report_date=report_date,
+                employee_name=employee_name,
+                page=current_page,
+                page_size=page_size,
+            )
+
+        data, current_token = call_with_resilience(
+            fn_name="query-daily-reports",
+            fn=fetch_page,
+            token=current_token,
+            max_retries=max_retries,
+            retry_backoff_seconds=retry_backoff_seconds,
+            auto_refresh_token=auto_refresh_token,
+            chrome_profile=chrome_profile,
+            origin_hint=origin_hint,
+            expected_user=expected_user,
+            api_base=api_base,
+            login_username=login_username,
+            password_env=password_env,
+            login_password=login_password,
+        )
+
+        items, total = extract_query_items(data)
+        all_items.extend(items)
+        if total is not None:
+            if page * page_size >= total:
+                break
+        elif len(items) < page_size:
+            break
+        page += 1
+
+    return all_items, current_token
+
+
+def filter_reports_by_employee(items: List[Dict[str, Any]], employee_name: Optional[str]) -> List[Dict[str, Any]]:
+    if not employee_name:
+        return items
+    expected = employee_name.strip()
+    return [i for i in items if to_non_empty_text(i.get("employee_name")) == expected]
 
 
 def merge_other_entries(other_entries: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -870,6 +1001,62 @@ def build_batch_payload(
     }
 
 
+def summarize_report_entry(entry: Dict[str, Any]) -> str:
+    project_name = to_non_empty_text(entry.get("project_name"))
+    if not project_name and entry.get("project_id") is not None:
+        project_name = f"project_id={entry.get('project_id')}"
+    if not project_name:
+        project_name = "学习或其他"
+
+    hours = normalize_hours(entry.get("work_hours"))
+    progress = to_non_empty_text(entry.get("progress_content")).replace("\n", " / ")
+    risks = to_non_empty_text(entry.get("risks_issues")).replace("\n", " / ")
+    line = f"- {project_name}: {hours:g}h; 进展: {progress}"
+    if risks:
+        line += f"; 风险: {risks}"
+    return line
+
+
+def print_submission_summary(payload: Dict[str, Any], title: str = "submission summary") -> None:
+    reports = payload.get("reports") or []
+    total_hours = round(sum(normalize_hours(r.get("work_hours")) for r in reports), 2)
+    print(title + ":")
+    print(f"  report_date: {payload.get('report_date')}")
+    print(f"  entries: {len(reports)}")
+    print(f"  total_hours: {total_hours:g}")
+    push_to = payload.get("push_to") or []
+    print(f"  push_to: {push_to}")
+    for entry in reports:
+        print("  " + summarize_report_entry(entry))
+
+
+def confirm_submission(payload: Dict[str, Any], yes: bool) -> bool:
+    if yes:
+        return True
+    if not sys.stdin.isatty():
+        print("ERROR: non-dry-run submission requires interactive confirmation or --yes.", file=sys.stderr)
+        return False
+
+    report_date = payload.get("report_date")
+    answer = input(f"Confirm submit daily report for {report_date}? Type yes to continue: ").strip().lower()
+    return answer == "yes"
+
+
+def validate_report_date(report_date: str) -> str:
+    value = to_non_empty_text(report_date)
+    if not value:
+        raise ValueError("--report-date is required and must be YYYY-MM-DD")
+    try:
+        parsed = dt.date.fromisoformat(value)
+    except ValueError:
+        raise ValueError("--report-date must be YYYY-MM-DD") from None
+
+    today = dt.date.today()
+    if parsed > today:
+        raise ValueError(f"--report-date cannot be later than today ({today.isoformat()})")
+    return parsed.isoformat()
+
+
 def api_submit_batch(api_base: str, token: str, payload: Dict[str, Any], timeout: int = 60) -> Dict[str, Any]:
     url = f"{api_base.rstrip('/')}/v1/daily-reports/batch"
     headers = auth_headers(token)
@@ -907,86 +1094,40 @@ def verify_submission(
     expected_user: Optional[str],
     login_username: str,
     password_env: str,
+    login_password: str,
     max_retries: int,
     retry_backoff_seconds: float,
 ) -> None:
     """Fetch all daily-report records for the given date and verify submitted entries are present."""
-    all_items: List[Dict[str, Any]] = []
-    page = 1
-    page_size = 50
-
-    def fetch_page(t: str) -> Dict[str, Any]:
-        return api_query_daily_reports(
-            api_base=api_base,
-            token=t,
-            report_date=report_date,
-            page=page,
-            page_size=page_size,
-        )
-
+    current_employee_name = resolve_current_employee_name(token, expected_user)
     try:
-        data, _ = call_with_resilience(
-            fn_name="query-daily-reports",
-            fn=fetch_page,
+        all_items, _ = fetch_daily_reports_for_date(
+            api_base=api_base,
             token=token,
-            max_retries=max_retries,
-            retry_backoff_seconds=retry_backoff_seconds,
+            report_date=report_date,
+            employee_name=None,
             auto_refresh_token=auto_refresh_token,
             chrome_profile=chrome_profile,
             origin_hint=origin_hint,
             expected_user=expected_user,
-            api_base=api_base,
             login_username=login_username,
             password_env=password_env,
+            login_password=login_password,
+            max_retries=max_retries,
+            retry_backoff_seconds=retry_backoff_seconds,
         )
     except Exception as err:
         print(f"\n⚠️  验证失败（查询出错）: {err}", file=sys.stderr)
         return
 
-    total = data.get("total", 0)
-    items = data.get("items") or []
-    all_items.extend(items)
-
-    while page * page_size < total:
-        page += 1
-
-        def fetch_page_n(t: str) -> Dict[str, Any]:
-            return api_query_daily_reports(
-                api_base=api_base,
-                token=t,
-                report_date=report_date,
-                page=page,
-                page_size=page_size,
-            )
-
-        try:
-            data, _ = call_with_resilience(
-                fn_name="query-daily-reports",
-                fn=fetch_page_n,
-                token=token,
-                max_retries=max_retries,
-                retry_backoff_seconds=retry_backoff_seconds,
-                auto_refresh_token=auto_refresh_token,
-                chrome_profile=chrome_profile,
-                origin_hint=origin_hint,
-                expected_user=expected_user,
-                api_base=api_base,
-                login_username=login_username,
-                password_env=password_env,
-            )
-        except Exception as err:
-            print(f"\n⚠️  验证部分失败（第 {page} 页查询出错）: {err}", file=sys.stderr)
-            break
-
-        items = data.get("items") or []
-        all_items.extend(items)
-
     # Filter current user's records
-    my_items = [i for i in all_items if i.get("employee_name") == "刘一彬"]
+    my_items = filter_reports_by_employee(all_items, current_employee_name)
     submitted_count = len(submitted_entries)
     verified_count = len(my_items)
 
     print(f"\n📋 提交验证:")
+    if current_employee_name:
+        print(f"   用户: {current_employee_name}")
     print(f"   提交条目数: {submitted_count}")
     print(f"   平台记录数: {verified_count}")
     if submitted_count == verified_count:
@@ -1006,7 +1147,7 @@ def parse_args() -> argparse.Namespace:
         "If omitted, load from credentials file key: api_base",
     )
     parser.add_argument("--entries-file", required=True, help="JSON array file of report entries")
-    parser.add_argument("--report-date", default=dt.date.today().isoformat(), help="YYYY-MM-DD")
+    parser.add_argument("--report-date", required=True, help="YYYY-MM-DD")
     parser.add_argument("--push-to", nargs="*", default=[], help="Optional employee names for push_to")
     parser.add_argument("--token", default="", help="JWT token; if omitted, auto-read from Chrome localStorage")
     parser.add_argument(
@@ -1036,6 +1177,12 @@ def parse_args() -> argparse.Namespace:
         help="Origin hint used when scanning localStorage LevelDB files; default derives from --api-base host",
     )
     parser.add_argument("--dry-run", action="store_true", help="Only print payload, do not submit")
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        default=False,
+        help="Skip interactive confirmation before submitting",
+    )
     parser.add_argument("--show-token-source", action="store_true", help="Print how token was obtained")
     parser.add_argument("--max-retries", type=int, default=2, help="Max retries for transient API/network failures")
     parser.add_argument(
@@ -1072,6 +1219,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    try:
+        report_date = validate_report_date(args.report_date)
+    except ValueError as err:
+        print(f"ERROR: {err}", file=sys.stderr)
+        return 2
+
     entries = load_entries(Path(args.entries_file))
     credentials_path: Optional[Path] = None
     if args.credentials_file:
@@ -1106,10 +1259,7 @@ def main() -> int:
         or get_cred_str("password_env")
         or "OPENCLAW_DAILY_REPORT_PASSWORD"
     )
-    if not os.environ.get(password_env, "").strip():
-        cred_password = get_cred_str("password")
-        if cred_password:
-            os.environ[password_env] = cred_password
+    login_password, _password_source = resolve_login_password(password_env, credentials)
 
     derived_origin = (urlparse(api_base).hostname or "").strip()
     origin_hint = (
@@ -1133,9 +1283,8 @@ def main() -> int:
         if token:
             token_source = f"chrome localStorage ({args.chrome_profile})"
         elif login_username:
-            password = read_password_from_env(password_env)
-            if password:
-                token = api_login(api_base=api_base, username=login_username, password=password)
+            if login_password:
+                token = api_login(api_base=api_base, username=login_username, password=login_password)
                 token_source = f"/v1/auth/login ({login_username})"
     if not token:
         print(
@@ -1175,12 +1324,13 @@ def main() -> int:
         api_base=api_base,
         login_username=login_username,
         password_env=password_env,
+        login_password=login_password,
     )
     alias_map_raw = load_aliases_file(args.project_aliases_file) if args.project_aliases_file else {}
     payload = build_batch_payload(
         entries=entries,
         projects=projects,
-        report_date=args.report_date,
+        report_date=report_date,
         push_to=args.push_to,
         alias_map_raw=alias_map_raw,
     )
@@ -1190,6 +1340,36 @@ def main() -> int:
 
     if args.dry_run:
         return 0
+
+    current_employee_name = resolve_current_employee_name(token, expected_user or None)
+    existing_items, token = fetch_daily_reports_for_date(
+        api_base=api_base,
+        token=token,
+        report_date=report_date,
+        employee_name=None,
+        auto_refresh_token=auto_refresh_token,
+        chrome_profile=args.chrome_profile,
+        origin_hint=origin_hint,
+        expected_user=expected_user or None,
+        login_username=login_username,
+        password_env=password_env,
+        login_password=login_password,
+        max_retries=args.max_retries,
+        retry_backoff_seconds=args.retry_backoff_seconds,
+    )
+    existing_items = filter_reports_by_employee(existing_items, current_employee_name)
+    if existing_items:
+        print(
+            f"ERROR: daily report already exists for {report_date}"
+            + (f" ({current_employee_name})" if current_employee_name else ""),
+            file=sys.stderr,
+        )
+        return 2
+
+    print_submission_summary(payload)
+    if not confirm_submission(payload, yes=args.yes):
+        print("submission cancelled", file=sys.stderr)
+        return 2
 
     result, token = call_with_resilience(
         fn_name="submit-batch",
@@ -1204,6 +1384,7 @@ def main() -> int:
         api_base=api_base,
         login_username=login_username,
         password_env=password_env,
+        login_password=login_password,
     )
     print("submit result:")
     print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -1212,7 +1393,7 @@ def main() -> int:
         verify_submission(
             api_base=api_base,
             token=token,
-            report_date=args.report_date,
+            report_date=report_date,
             submitted_entries=payload["reports"],
             auto_refresh_token=auto_refresh_token,
             chrome_profile=args.chrome_profile,
@@ -1220,6 +1401,7 @@ def main() -> int:
             expected_user=expected_user or None,
             login_username=login_username,
             password_env=password_env,
+            login_password=login_password,
             max_retries=args.max_retries,
             retry_backoff_seconds=args.retry_backoff_seconds,
         )
